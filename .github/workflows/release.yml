@@ -1,6 +1,6 @@
 # Publishes a release when a version tag is pushed, tested against the SDK
 # pinned in native/sdk.env. The tag has to match the version in
-# gradle.properties: v1.0.0 for 1.0.0, or v1.0.0-rc1 for a pre-release.
+# gradle.properties: v2026.10.05 for 2026.10.05, or v2026.10.05-rc1 for a pre-release.
 name: Release
 
 on:

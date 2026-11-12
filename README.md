@@ -205,9 +205,13 @@ the device classes use. macOS x86-64 and Windows ARM64, which have no SDK
 libraries, run the tests that need none, and check that the jar starts and
 reports the libraries missing.
 
+Versions follow the release date of the pinned SDK as `YYYY.MM.DD`, so
+`signal_hound_sdk_10_05_26.zip` gives `2026.10.05`. To release again against
+the same SDK, add a fourth part, such as `2026.10.05.1`.
+
 To release, set `version` in `gradle.properties`, merge, then tag:
-`git tag v1.0.0 && git push origin v1.0.0`. The workflow rejects a tag that does
-not match. For a pre-release add a suffix, such as `v1.0.0-rc1`.
+`git tag v2026.10.05 && git push origin v2026.10.05`. The workflow rejects a tag
+that does not match. For a pre-release add a suffix, such as `v2026.10.05-rc1`.
 
 To adopt a new SDK, set `SDK_URL` and `SDK_SHA256` in `native/sdk.env`. The
 nightly build reports when Signal Hound publishes a new one. If it declares
