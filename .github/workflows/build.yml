@@ -1,0 +1,230 @@
+# Checks the bindings against the Signal Hound SDK headers, tests them on all
+# six platforms (against the SDK's libraries where the SDK has a build for the
+# platform), assembles the jar, and checks that jar on each platform.
+# Called by the ci, nightly and release workflows.
+#
+# The SDK is downloaded from Signal Hound for each job and kept only in the
+# Actions cache, never in an artifact: its license does not allow
+# redistributing it, and the jar never contains it.
+name: Build
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Version of the jar
+        required: true
+        type: string
+      sdk_url:
+        description: SDK zip to test against; empty uses the pin in native/sdk.env
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+env:
+  JAVA_VERSION: '23'
+
+jobs:
+  bindings:
+    name: Check bindings
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - id: sdk
+        name: Choose SDK
+        env:
+          URL: ${{ inputs.sdk_url }}
+        run: |
+          source native/sdk.env
+          echo "url=${URL:-$SDK_URL}" >> "$GITHUB_OUTPUT"
+          echo "pinned=$([ -z "$URL" ] || [ "$URL" = "$SDK_URL" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v5
+        with:
+          path: sdk/*.zip
+          key: signalhound-sdk-${{ steps.sdk.outputs.url }}
+
+      - name: Fetch SDK
+        run: ./native/fetch-sdk.sh "${{ steps.sdk.outputs.url }}"
+
+      # The pinned SDK must match the bindings. A newer SDK only warns, so that
+      # one new Signal Hound function does not stop the nightly builds.
+      - name: Compare headers with bindings
+        run: |
+          if ! ./native/check-bindings.sh sdk/signal_hound_sdk; then
+            [ "${{ steps.sdk.outputs.pinned }}" = true ] && exit 1
+            echo "::warning::Bindings differ from the headers of ${{ steps.sdk.outputs.url }}"
+          fi
+
+  test:
+    name: Test ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # require: the APIs whose SDK library must load on the platform. The
+        # SDK has no libraries for macOS x86-64 or Windows ARM64, and bb_api on
+        # Linux aarch64 needs an FTDI library that the SDK does not ship, so
+        # those run what they can and skip the rest.
+        include:
+          - { platform: linux-x86_64, runner: ubuntu-24.04, require: 'bb,sm,sp' }
+          - { platform: linux-aarch64, runner: ubuntu-24.04-arm, require: 'sm,sp' }
+          - { platform: macos-x86_64, runner: macos-15-intel, require: '' }
+          - { platform: macos-aarch64, runner: macos-15, require: 'bb,sm,sp' }
+          - { platform: windows-x86_64, runner: windows-2022, require: 'bb,sm,sp' }
+          - { platform: windows-aarch64, runner: windows-11-arm, require: '' }
+    steps:
+      - uses: actions/checkout@v7
+
+      - id: sdk
+        name: Choose SDK
+        shell: bash
+        env:
+          URL: ${{ inputs.sdk_url }}
+        run: |
+          source native/sdk.env
+          echo "url=${URL:-$SDK_URL}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v5
+        with:
+          path: sdk/*.zip
+          key: signalhound-sdk-${{ steps.sdk.outputs.url }}
+
+      # The libraries need libusb-1.0; the macOS ones load it from Homebrew's
+      # default prefix, /opt/homebrew/opt/libusb.
+      - name: Install libusb (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q libusb-1.0-0
+
+      - name: Install libusb (macOS)
+        if: runner.os == 'macOS'
+        run: brew install libusb
+
+      - name: Fetch SDK libraries for this platform
+        shell: bash
+        env:
+          JSIGNALHOUND_PLATFORM: ${{ matrix.platform }}
+        run: ./native/fetch-sdk.sh "${{ steps.sdk.outputs.url }}"
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - uses: gradle/actions/setup-gradle@v6
+
+      - name: Test bindings on this platform
+        shell: bash
+        run: |
+          ./gradlew test --console=plain -Pversion="${{ inputs.version }}" \
+            -PlibraryPath="$PWD/sdk/lib/${{ matrix.platform }}" -PrequireApis="${{ matrix.require }}"
+
+  package:
+    name: Assemble jar
+    needs: [bindings, test]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - uses: gradle/actions/setup-gradle@v6
+
+      - name: Assemble
+        env:
+          VERSION: ${{ inputs.version }}
+        run: ./gradlew assemble --console=plain -Pversion="$VERSION"
+
+      # The jar must not contain native code, which would include Signal
+      # Hound's libraries.
+      - name: Check that the jar is pure Java
+        run: |
+          if unzip -l build/libs/jsignalhound-*.jar | grep -Ei '\.(so|dll|dylib)(\.[0-9]+)*$'; then
+            echo "::error::The jar contains native libraries"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: jars
+          path: build/libs/*.jar
+          if-no-files-found: error
+          retention-days: 7
+
+  verify:
+    name: Verify jar ${{ matrix.platform }}
+    needs: package
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # load: an API whose SDK library the packaged jar must find.
+        include:
+          - { platform: linux-x86_64, runner: ubuntu-22.04, load: sm_api }
+          - { platform: linux-aarch64, runner: ubuntu-22.04-arm, load: sm_api }
+          - { platform: macos-x86_64, runner: macos-15-intel, load: '' }
+          - { platform: macos-aarch64, runner: macos-15, load: sm_api }
+          - { platform: windows-x86_64, runner: windows-2022, load: sm_api }
+          - { platform: windows-aarch64, runner: windows-11-arm, load: '' }
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: jars
+          path: jars
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - name: Run the jar without Signal Hound libraries
+        shell: bash
+        run: |
+          jar="$(ls jars/jsignalhound-*.jar | grep -Ev -- '-(sources|javadoc)\.jar$')"
+          java -jar "$jar" -v | tee output.txt
+          grep -qF "jSignalHound ${{ inputs.version }} on ${{ matrix.platform }}" output.txt
+          grep -q '^sm_api (SM200 and SM435): not installed' output.txt
+
+      - id: sdk
+        if: matrix.load != ''
+        name: Choose SDK
+        shell: bash
+        env:
+          URL: ${{ inputs.sdk_url }}
+        run: |
+          source native/sdk.env
+          echo "url=${URL:-$SDK_URL}" >> "$GITHUB_OUTPUT"
+
+      - if: matrix.load != ''
+        uses: actions/cache@v5
+        with:
+          path: sdk/*.zip
+          key: signalhound-sdk-${{ steps.sdk.outputs.url }}
+
+      - name: Install libusb (Linux)
+        if: matrix.load != '' && runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q libusb-1.0-0
+
+      - name: Install libusb (macOS)
+        if: matrix.load != '' && runner.os == 'macOS'
+        run: brew install libusb
+
+      - name: Run the jar with the SDK libraries
+        if: matrix.load != ''
+        shell: bash
+        env:
+          JSIGNALHOUND_PLATFORM: ${{ matrix.platform }}
+        run: |
+          ./native/fetch-sdk.sh "${{ steps.sdk.outputs.url }}" >/dev/null
+          jar="$(ls jars/jsignalhound-*.jar | grep -Ev -- '-(sources|javadoc)\.jar$')"
+          java -Djsignalhound.library.path="$PWD/sdk/lib/${{ matrix.platform }}" -jar "$jar" | tee output.txt
+          grep -q '^${{ matrix.load }} [0-9]' output.txt

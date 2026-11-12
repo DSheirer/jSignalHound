@@ -19,3 +19,6 @@ gradle-app.setting
 .project
 # JDT-specific (Eclipse Java Development Tools)
 .classpath
+
+# Signal Hound SDK downloaded by native/fetch-sdk.sh. It is not redistributable.
+/sdk/

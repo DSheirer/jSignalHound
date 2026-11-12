@@ -1,0 +1,78 @@
+# Publishes a release when a version tag is pushed, tested against the SDK
+# pinned in native/sdk.env. The tag has to match the version in
+# gradle.properties: v1.0.0 for 1.0.0, or v1.0.0-rc1 for a pre-release.
+name: Release
+
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+*']
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - id: version
+        run: |
+          version="$(sed -n 's/^version=//p' gradle.properties)"
+          case "$GITHUB_REF_NAME" in
+            "v$version" | "v$version"-*) ;;
+            *)
+              echo "::error::Tag $GITHUB_REF_NAME does not match version $version in gradle.properties"
+              exit 1
+              ;;
+          esac
+          echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: prepare
+    uses: ./.github/workflows/build.yml
+    with:
+      version: ${{ needs.prepare.outputs.version }}
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: jars
+          path: jars
+
+      # Publishing is split into steps that can all be repeated, so a failed
+      # upload or a re-run finishes the draft left behind rather than failing on
+      # it: gh retries uploads, and a retry of an upload that had in fact
+      # succeeded fails with "ReleaseAsset.name already exists" unless clobbering.
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          source native/sdk.env
+          (cd jars && sha256sum *.jar > SHA256SUMS)
+          prerelease=()
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            prerelease=(--prerelease)
+          fi
+          if gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft 2>/dev/null | grep -qx false; then
+            echo "::error::Release $GITHUB_REF_NAME is already published"
+            exit 1
+          elif gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "Reusing the draft release $GITHUB_REF_NAME"
+          else
+            gh release create "$GITHUB_REF_NAME" --draft "${prerelease[@]}" \
+              --verify-tag --generate-notes --title "jSignalHound ${GITHUB_REF_NAME#v}" \
+              --notes "Tested against the Signal Hound SDK $(basename "$SDK_URL"). The jar contains no Signal Hound libraries; install them from the [Signal Hound SDK]($SDK_PAGE)."
+          fi
+          gh release upload "$GITHUB_REF_NAME" jars/* --clobber
+          gh release edit "$GITHUB_REF_NAME" --draft=false
