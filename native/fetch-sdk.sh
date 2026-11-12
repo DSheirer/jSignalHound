@@ -56,15 +56,23 @@ else
     echo "Unpinned SDK $URL has SHA-256 $ACTUAL"
 fi
 
-# Only the headers and libraries of the three bound APIs are needed.
+# Only the headers and libraries of the three bound APIs are needed. The zip is
+# extracted whole and pruned afterwards, because unzip's member patterns are
+# not portable: the unzip.exe on the Windows runners matches none of them and
+# extracts nothing.
 rm -rf "$SDK/signal_hound_sdk"
-unzip -q -o "$ZIP" \
-    'signal_hound_sdk/device_apis/bb_series/*' \
-    'signal_hound_sdk/device_apis/sm_series/*' \
-    'signal_hound_sdk/device_apis/sp_series/*' \
-    'signal_hound_sdk/device_apis/LICENSE.rtf' \
-    -x '*/examples/*' -d "$SDK"
+unzip -q -o "$ZIP" -d "$SDK"
 APIS="$SDK/signal_hound_sdk/device_apis"
+for series in bb_series sm_series sp_series; do
+    if [ ! -d "$APIS/$series/lib" ]; then
+        echo "$(basename "$ZIP") has no signal_hound_sdk/device_apis/$series/lib" >&2
+        exit 1
+    fi
+done
+find "$SDK/signal_hound_sdk" -mindepth 1 -maxdepth 1 ! -name device_apis -exec rm -rf {} +
+find "$APIS" -mindepth 1 -maxdepth 1 ! -name bb_series ! -name sm_series \
+    ! -name sp_series ! -name LICENSE.rtf -exec rm -rf {} +
+find "$APIS" -mindepth 2 -maxdepth 2 -type d -name examples -exec rm -rf {} +
 
 OUT="$SDK/lib/$PLATFORM"
 rm -rf "$OUT"
